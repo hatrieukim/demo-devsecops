@@ -1,0 +1,49 @@
+# Run pipelines for merge requests and for the default branch only,
+# so a push to an MR branch does not start two pipelines.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages:
+  - lint
+  - test
+
+default:
+  image: python:3.12-slim
+
+lint:
+  stage: lint
+  script:
+    - pip install --quiet ruff==0.16.10
+    # Machine-readable report for the Code Quality widget on the MR
+    - ruff check . --exit-zero --output-format=gitlab > gl-code-quality-report.json
+    # Human-readable output; fails the job if there are findings
+    - ruff check .
+  artifacts:
+    when: always
+    reports:
+      codequality: gl-code-quality-report.json
+
+test:
+  stage: test
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_DB: app
+    POSTGRES_USER: app
+    POSTGRES_PASSWORD: app
+    DATABASE_URL: postgresql://app:app@postgres:5432/app
+  script:
+    - pip install --quiet -r requirements-dev.txt
+    - pytest --junitxml=report.xml --cov=app --cov-report=term --cov-report=xml:coverage.xml
+  # Regex that pulls the total % from pytest-cov output into the MR and pipeline
+  coverage: '/TOTAL.*\s(\d+(?:\.\d+)?)%/'
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
