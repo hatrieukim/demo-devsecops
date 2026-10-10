@@ -8,6 +8,7 @@ workflow:
 stages:
   - lint
   - test
+  - build
 
 default:
   image: python:3.12-slim
@@ -47,3 +48,25 @@ test:
       coverage_report:
         coverage_format: cobertura
         path: coverage.xml
+
+build-image:
+  stage: build
+  image: docker:28
+  services:
+    - docker:28-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    # Two tags: the commit SHA (never changes) and "latest" (always the newest)
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
+    # Sanity check: the app can be imported inside the image
+    - docker run --rm "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" python -c "import app.main"
+    # Push only from main. On merge requests the image is built to prove the
+    # Dockerfile works, then thrown away.
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+        docker push --all-tags "$CI_REGISTRY_IMAGE"
+      else
+        echo "Not on $CI_DEFAULT_BRANCH, image built but not pushed"
+      fi
