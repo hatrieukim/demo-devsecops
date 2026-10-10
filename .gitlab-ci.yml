@@ -5,10 +5,25 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
+# Security scanners maintained by GitLab. Each template adds one or more jobs.
+include:
+  - template: Jobs/Secret-Detection.gitlab-ci.yml      # leaked passwords, keys, tokens
+  - template: Jobs/SAST.gitlab-ci.yml                  # dangerous patterns in source code
+  - template: Jobs/SAST-IaC.gitlab-ci.yml              # misconfigured Dockerfile / infra files
+  - template: Jobs/Dependency-Scanning.v2.gitlab-ci.yml # known CVEs in Python libraries
+  - template: Jobs/Container-Scanning.gitlab-ci.yml    # known CVEs inside the Docker image
+  - template: Security/DAST.gitlab-ci.yml              # attack the running app from outside
+
+variables:
+  # Our workflow only runs merge request pipelines, so the scanners must too
+  AST_ENABLE_MR_PIPELINES: "true"
+
 stages:
   - lint
-  - test
+  - test       # also: secret detection, SAST, IaC, dependency scanning
   - build
+  - scan       # container scanning (needs the built image)
+  - dast       # DAST (needs the running app)
 
 default:
   image: python:3.12-slim
@@ -57,16 +72,30 @@ build-image:
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   script:
-    # Two tags: the commit SHA (never changes) and "latest" (always the newest)
-    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
     # Sanity check: the app can be imported inside the image
     - docker run --rm "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" python -c "import app.main"
-    # Push only from main. On merge requests the image is built to prove the
-    # Dockerfile works, then thrown away.
+    # Always push the commit tag: container scanning and DAST pull this exact image
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    # "latest" moves only when code lands on main
     - |
       if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
-        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-        docker push --all-tags "$CI_REGISTRY_IMAGE"
-      else
-        echo "Not on $CI_DEFAULT_BRANCH, image built but not pushed"
+        docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:latest"
+        docker push "$CI_REGISTRY_IMAGE:latest"
       fi
+
+# --- Overrides for the included security jobs --------------------------------
+
+container_scanning:
+  stage: scan
+  variables:
+    CS_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+
+dast:
+  # Start the image we just built as a service, then scan it
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: app
+  variables:
+    DAST_TARGET_URL: http://app:8000/docs
