@@ -24,6 +24,8 @@ stages:
   - build
   - scan       # container scanning (needs the built image)
   - dast       # DAST (needs the running app)
+  - staging    # automatic deploy after a merge to main
+  - production # manual deploy, needs approval
 
 default:
   image: python:3.12-slim
@@ -99,3 +101,54 @@ dast:
       alias: app
   variables:
     DAST_TARGET_URL: http://app:8000/docs
+
+# --- Deploy ------------------------------------------------------------------
+# The target is "kimlab", a machine that is only reachable over Tailscale.
+# The job joins the tailnet as a short-lived node, then SSHes in. The SSH key
+# is locked to one script on kimlab, which takes "<environment> <image tag>".
+# See deploy/README.md. These jobs only exist on main.
+
+.deploy:
+  image: alpine:3.22
+  variables:
+    GIT_STRATEGY: none          # nothing from the repo is needed, only variables
+    DEPLOY_SSH_USER: kim_it
+  before_script:
+    - '[ -n "$TS_AUTHKEY" ] || { echo "CI/CD variable TS_AUTHKEY is not set"; exit 1; }'
+    - apk add --no-cache --quiet tailscale openssh-client
+    # Userspace networking: CI containers have no TUN device
+    - mkdir -p /var/run/tailscale
+    - 'tailscaled --tun=userspace-networking --state=mem: > /tmp/tailscaled.log 2>&1 &'
+    - for i in $(seq 1 20); do [ -S /var/run/tailscale/tailscaled.sock ] && break; sleep 0.5; done
+    - tailscale up --auth-key="$TS_AUTHKEY" --hostname="gitlab-ci-$CI_JOB_ID" --accept-dns=false --timeout=60s
+    - install -m 700 -d ~/.ssh
+    - echo "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+    # Pinned host key, so the job cannot be pointed at an impostor machine
+    - echo "$KIMLAB_KNOWN_HOSTS" > ~/.ssh/known_hosts
+  script:
+    - >
+      ssh -i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o BatchMode=yes
+      -o ProxyCommand="tailscale nc %h %p"
+      "$DEPLOY_SSH_USER@$KIMLAB_IP" "$CI_ENVIRONMENT_NAME $CI_COMMIT_SHORT_SHA"
+  after_script:
+    # Remove the short-lived node from the tailnet right away
+    - tailscale logout || true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-staging:
+  extends: .deploy
+  stage: staging
+  environment:
+    name: staging
+    url: http://$KIMLAB_IP:8101/docs
+
+deploy-production:
+  extends: .deploy
+  stage: production
+  environment:
+    name: production
+    url: http://$KIMLAB_IP:8100/docs
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
