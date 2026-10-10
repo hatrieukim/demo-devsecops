@@ -13,3 +13,13 @@ def test_hello_returns_message():
 
 def test_unknown_route_returns_404():
     assert client.get("/nope").status_code == 404
+
+
+def test_version_defaults_to_dev():
+    assert client.get("/version").json() == {"version": "dev", "environment": "local"}
+
+
+def test_version_reads_environment(monkeypatch):
+    monkeypatch.setenv("APP_VERSION", "abc1234")
+    monkeypatch.setenv("APP_ENV", "staging")
+    assert client.get("/version").json() == {"version": "abc1234", "environment": "staging"}
