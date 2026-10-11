@@ -12,6 +12,11 @@ def hello() -> dict:
     return {"message": "hello"}
 
 
+@app.get("/ping")
+def ping() -> dict:
+    return {"pong": True}
+
+
 @app.get("/db-check")
 def db_check() -> dict:
     return {"db": fetch_one("SELECT 1")[0] == 1}

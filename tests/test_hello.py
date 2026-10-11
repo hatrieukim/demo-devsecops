@@ -11,6 +11,12 @@ def test_hello_returns_message():
     assert response.json() == {"message": "hello"}
 
 
+def test_ping_returns_pong():
+    response = client.get("/ping")
+    assert response.status_code == 200
+    assert response.json() == {"pong": True}
+
+
 def test_unknown_route_returns_404():
     assert client.get("/nope").status_code == 404
 
