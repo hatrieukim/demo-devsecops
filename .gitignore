@@ -6,3 +6,9 @@ __pycache__/
 coverage.xml
 report.xml
 gl-code-quality-report.json
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/

@@ -1,93 +1,101 @@
 # demo-devsecops
 
-Learning sandbox: walk through GitLab's 9 DevSecOps stages
+A small learning sandbox that walks a tiny web API through GitLab's DevSecOps
+stages: plan, create, verify, package, secure, release, configure and monitor.
+It was built as a warm-up for the GitLab Transcend hackathon (October 2026),
+before the main entry.
 
-## Getting started
+The application itself is deliberately trivial. The interesting part is the
+`.gitlab-ci.yml` pipeline around it: lint, tests against a real Postgres,
+six security scanners, a Docker image in the Container Registry, an automatic
+staging deploy and a manual production deploy over Tailscale. One feature
+(`GET /ping`) was implemented end to end by the GitLab Duo Developer agent,
+from issue to merged merge request.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## The app
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+A [FastAPI](https://fastapi.tiangolo.com/) service with four endpoints:
 
-## Add your files
+| Endpoint | Returns |
+|---|---|
+| `GET /hello` | `{"message": "hello"}` |
+| `GET /ping` | `{"pong": true}` |
+| `GET /db-check` | `{"db": true}` when Postgres answers `SELECT 1` |
+| `GET /version` | the running commit (`APP_VERSION`) and environment (`APP_ENV`) |
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+The database connection string comes from `DATABASE_URL`
+(default `postgresql://app:app@localhost:5432/app`).
 
+## Run locally
+
+Requires Python 3.12 and, for the database endpoints and tests, Postgres.
+
+```sh
+python3.12 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+
+# Postgres for /db-check and the database tests
+docker run -d --name demo-pg -p 5432:5432 \
+  -e POSTGRES_DB=app -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app \
+  postgres:16-alpine
+
+uvicorn app.main:app --reload
+# open http://127.0.0.1:8000/docs
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/gitlab-ai-hackathon/transcend-october-2026/43152094/demo-devsecops.git
-git branch -M main
-git push -uf origin main
+
+Or run the container image:
+
+```sh
+docker build -t demo-devsecops .
+docker run --rm -p 8000:8000 demo-devsecops
 ```
 
-## Integrate with your tools
+## Tests and lint
 
-* [Set up project integrations](https://gitlab.com/gitlab-ai-hackathon/transcend-october-2026/43152094/demo-devsecops/-/settings/integrations)
+```sh
+ruff check .
+pytest --cov=app            # needs Postgres, see above
+pytest tests/test_hello.py  # endpoint tests only, no database needed
+```
 
-## Collaborate with your team
+## CI/CD pipeline
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+`.gitlab-ci.yml` runs for merge requests and for the default branch only.
 
-## Test and Deploy
+| Stage | Jobs |
+|---|---|
+| lint | `ruff`, with a Code Quality report on the merge request |
+| test | `pytest` against a Postgres service with JUnit and coverage reports; Secret Detection, SAST, IaC SAST and Dependency Scanning from GitLab templates |
+| build | builds the image, checks that it imports, pushes `:<short sha>` (and `:latest` on `main`) to the Container Registry |
+| scan | Container Scanning of the image just built |
+| dast | DAST against the image started as a CI service |
+| staging | automatic deploy after every merge to `main` |
+| production | manual deploy from the pipeline |
 
-Use the built-in continuous integration in GitLab.
+At the last commit the lint, test and scanner jobs are switched off by
+variables at the top of `.gitlab-ci.yml` (`VERIFY_DISABLED` and the
+`*_DISABLED` flags) to keep the pipeline fast. Delete those lines to switch
+them back on.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+### Deploy
 
-***
+Both environments run on a private machine that is reachable only over
+[Tailscale](https://tailscale.com/). The deploy job joins the tailnet as a
+short-lived node, then connects over SSH with a key that the target machine
+restricts to a single script taking `<environment> <image tag>`. The compose
+file and that script live on the target machine, not in this repository, so
+whoever can push here decides which image runs but not how it runs. See
+[deploy/README.md](deploy/README.md) for the full flow, the CI/CD variables it
+needs (`TS_AUTHKEY`, `DEPLOY_SSH_KEY_B64`, `KIMLAB_KNOWN_HOSTS`, `KIMLAB_IP`)
+and how to roll back.
 
-# Editing this README
+To deploy somewhere else, replace the `.deploy` job template with your own
+target; the rest of the pipeline does not depend on it.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+The pipeline is written for GitLab CI/CD. On GitHub it is kept as reference;
+it does not run there.
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+[MIT](LICENSE)
